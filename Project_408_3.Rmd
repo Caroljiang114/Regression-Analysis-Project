@@ -1,0 +1,319 @@
+---
+title: "Project_408"
+author: "Chongchong Jiang/Boateng, Bernard/Jain, Sunayana"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(sf)
+library(viridis)
+library(car)
+library(ggthemr)
+ggthemr("fresh")
+```
+
+```{r}
+#1 Reading and Understanding the Data
+miami_housing <- read.csv("https://raw.githubusercontent.com/Caroljiang114/testing/main/miami-housing.csv")
+str(miami_housing)
+summary(miami_housing)
+```
+
+```{r}
+#2 Checking Null values 
+colSums(is.na(miami_housing))
+# There are no NULL values in the dataset, hence it is clean.
+```
+
+```{r}
+#3 scatterplot for continous variables
+g <- function(column_name, data) {
+  data %>%
+    ggplot(aes(x = !!as.name(column_name), y = SALE_PRC)) +
+    geom_point() 
+}
+columns <- names(miami_housing)[5:14]
+columns %>% 
+  map(g, miami_housing)
+
+```
+
+```{r}
+#4 boxplot for categorical variables
+g <- function(column_name, data) {
+  data %>%
+    ggplot(aes(x = factor(!!as.name(column_name)), y = SALE_PRC)) +
+    geom_boxplot() +
+    labs(x = column_name, y = "SALE_PRC") +
+    theme_minimal()  
+}
+
+columns <- names(miami_housing)[c(15,17)]
+
+columns %>% 
+  map(g, data = miami_housing)
+
+```
+
+```{r}
+#5 barplot for month variables
+miami_housing %>%
+  group_by(month_sold) %>%
+  summarise(SALE_PRC = sum(SALE_PRC)) %>%
+  ggplot(aes(x = factor(month_sold), y = SALE_PRC)) +
+  geom_bar(stat = "identity", position = "dodge", color = "white") +
+  labs(x = "Month in 2016 Sold", y = "Total Sale Price") +
+  ggtitle("Total Sale Prices by Month in 2016")
+```
+
+```{r}
+#6 correlation coefficients
+
+correlation_matrix <- miami_housing %>%
+  select(-LONGITUDE, -LATITUDE, -PARCELNO) %>% 
+  cor() %>% 
+  round(digits = 2)
+correlation_matrix
+cor_data <- as.data.frame(as.table(correlation_matrix))
+names(cor_data) <- c("Var1", "Var2", "Corr")
+
+ggplot(cor_data, aes(Var1, Var2, fill = Corr)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "lightblue", mid = "white", high = "darkblue", midpoint = 0, limits = c(-1, 1)) +
+  labs(title = "Correlation Heatmap", x = "Variables", y = "Variables") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+```{r}
+#7 Data normalization
+columns_to_keep <- c("avno60plus","month_sold","structure_quality","SALE_PRC","LATITUDE","LONGITUDE","PARCELNO")
+columns_to_normalize <- setdiff(names(miami_housing), columns_to_keep)
+normalized_data <- scale(miami_housing[columns_to_normalize])
+normal <- cbind(miami_housing[columns_to_keep], normalized_data)
+#Removing the spatial values, ID values,and month_sold which have 0 correlation coefficient with sold_price
+normal <- normal %>% select(-LATITUDE,-LONGITUDE,-PARCELNO,-month_sold)
+head(normal)
+```
+
+
+```{r}
+#8 encode categorical variables to dummy variables
+normal$structure_quality <- as.factor(normal$structure_quality)
+normal$avno60plus <- as.factor(normal$avno60plus)
+```
+
+```{r}
+#9 creat full model with full dataset, without month_sold because of 0 values in correlation coefficients.
+full.model <- lm(SALE_PRC~., data=normal)
+summary(full.model)
+```
+```{r}
+#10 calculate VIF
+vif_result <- car::vif(full.model)
+vif_result
+```
+```{r}
+#11 residuals check with full model
+plot(full.model$residuals ~ full.model$fitted.values, xlab = 'yhat', ylab = 'residue',
+     main = 'Residuals Distribution Before Model Transformation')
+abline(h=0)
+qqnorm(full.model$residuals)
+qqline(full.model$residuals)
+residuals <- residuals(full.model)
+acf(residuals)
+plot_acf <- acf(residuals)
+plot(plot_acf)
+```
+```{r}
+#12 In order to improve the residuals distribution, we transform y to log(y)
+# residuals check with log model
+log.model <- lm(log(SALE_PRC)~., data=normal)
+plot(log.model$residuals~log.model$fitted.values, xlab='yhat', ylab='residue', main = 'Residuals Distribution After Model Transformation')
+abline(h=0)
+qqnorm(log.model$residuals)
+qqline(log.model$residuals)
+residuals <- residuals(log.model)
+acf(residuals)
+plot_acf <- acf(residuals)
+plot(plot_acf)
+```
+
+
+```{r}
+#13 backward with AIC with log model
+backward_model <- step(log.model, direction = "backward")
+summary(backward_model)
+```
+```{r}
+#14 forward with AIC with log model
+forward_model <- step(log.model, direction = "forward")
+summary(forward_model)
+```
+```{r}
+#15 Backward with p value with log model
+summary(log.model)
+update_log.model <- update(log.model, .~.-WATER_DIST)
+summary(update_log.model)
+```
+
+```{r}
+#16 Identification of Outliers
+# studentized residues
+n <- dim(normal)[1]
+sr <- rstudent(update_log.model)
+df <- n-14-1
+
+# use 5% critical value as cutoff
+outliers <-which(abs(sr) > qt(0.975, df))
+sum(abs(sr) > qt(0.975, df))
+miami_housing_no_outliers <- normal[-outliers, ]
+
+
+```
+```{r}
+#17 influential observation
+beta.change <- dfbeta(update_log.model)
+plot(beta.change[,3])
+
+```
+
+```{r}
+#18 cross validation with updated log model(without WATER_DIST) and full dataset
+set.seed(2022)
+index.random <- sample(1:dim(normal)[1])
+groups <- cut(1:13932, 5, labels = FALSE)
+index.fold <- split(index.random, groups)
+RMSEs_test <- c()
+RMSEs_train <- c()
+for(index.test in index.fold){
+  data.test <- normal[index.test,]
+  data.train <- normal[-index.test,]
+  lm.model <- lm(log(SALE_PRC)~.-WATER_DIST, data=data.train)
+  yhat.test <- predict(lm.model, data.test)
+  y.test <- log(data.test$SALE_PRC)
+  MSE.test <- mean((y.test - yhat.test)^2)
+  RMSE.test <- sqrt(MSE.test)
+  RMSEs_test <- c(RMSEs_test, RMSE.test)
+  yhat.train <- fitted(lm.model, data.train)
+  y.train <- log(data.train$SALE_PRC)
+  MSE.train <- mean((y.train - yhat.train)^2)
+  RMSE.train <- sqrt(MSE.train)
+  RMSEs_train <- c(RMSEs_train, RMSE.train)
+  
+}
+plot(1:5, RMSEs_test, type='b', col='red', xlab='Fold', ylab='RMSE_test')
+mean(RMSEs_test)
+plot(1:5, RMSEs_train, type='b', col='red', xlab='Fold', ylab='RMSE_train')
+mean(RMSEs_train)
+```
+
+
+```{r}
+#19 cross validation with updated log model(without WATER_DIST)  and dataset without outliers
+set.seed(2022)
+index.random <- sample(1:dim(miami_housing_no_outliers)[1])
+groups <- cut(1:13124, 5, labels = FALSE)
+index.fold <- split(index.random, groups)
+RMSEs_test <- c()
+RMSEs_train <- c()
+
+for(index.test in index.fold){
+  data.test <- miami_housing_no_outliers[index.test,]
+  data.train <- miami_housing_no_outliers[-index.test,]
+  lm.model <- lm(log(SALE_PRC)~.-WATER_DIST, data=data.train)
+  yhat.test <- predict(lm.model, data.test)
+  y.test <- log(data.test$SALE_PRC)
+  MSE.test <- mean((y.test - yhat.test)^2)
+  RMSE.test <- sqrt(MSE.test)
+  RMSEs_test <- c(RMSEs_test, RMSE.test)
+  yhat.train <- fitted(lm.model, data.train)
+  y.train <- log(data.train$SALE_PRC)
+  MSE.train <- mean((y.train - yhat.train)^2)
+  RMSE.train <- sqrt(MSE.train)
+  RMSEs_train <- c(RMSEs_train, RMSE.train)
+  
+}
+plot(1:5, RMSEs_test, type='b', col='red', xlab='Fold', ylab='RMSE_test')
+mean(RMSEs_test)
+plot(1:5, RMSEs_train, type='b', col='red', xlab='Fold', ylab='RMSE_train')
+mean(RMSEs_train)
+
+
+```
+
+```{r}
+#20 comparing updated log model with or without outliers
+# updated log model with full dataset
+model_1 <- lm(log(SALE_PRC)~.-WATER_DIST, data=normal)
+summary(model_1)
+# updated log model without outliers(final model)
+model_2 <- lm(log(SALE_PRC)~.-WATER_DIST, data=miami_housing_no_outliers)
+summary(model_2)
+
+````
+
+```{r}
+#21 variable importance(final model)
+model_coefficients <- coef(model_2)
+coefficients <- model_coefficients[-1]
+variable_names <- names(coefficients)
+
+library(ggplot2)
+library(dplyr)
+
+data <- data.frame(variable = variable_names, coefficient = coefficients) %>%
+  arrange(coefficient)
+
+data$variable <- factor(data$variable, levels = data$variable[order(data$coefficient)])
+
+ggplot(data, aes(x = variable, y = coefficient, fill = ifelse(coefficient < 0, "Negative", "Positive"))) +
+  geom_bar(stat = "identity", position = "identity") +
+  labs(title = "Variable Importance (Without Intercept)", x = "Variables", y = "Coefficient Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8)) +
+  scale_fill_manual(values = c("Negative" = "lightblue", "Positive" = "darkblue"))
+
+```
+```{r}
+
+model_coefficients <- coef(model_2)
+coefficients <- model_coefficients[-1]
+variable_names <- names(coefficients)
+
+library(ggplot2)
+library(dplyr)
+
+data <- data.frame(variable = variable_names, coefficient = abs(coefficients)) %>%
+  arrange(coefficient)
+
+data$variable <- factor(data$variable, levels = data$variable[order(data$coefficient)])
+
+ggplot(data, aes(x = variable, y = coefficient, fill = coefficient)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Variable Importance (Without Intercept)", x = "Variables", y = "Coefficient Magnitude") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8)) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue")
+```
+
+```{r}
+#22 residuals check with final model
+
+plot(model_2$residuals~model_2$fitted.values, xlab='yhat', ylab='residue')
+abline(h=0)
+qqnorm(model_2$residuals)
+qqline(model_2$residuals)
+residuals <- residuals(model_2)
+acf(residuals)
+plot_acf <- acf(residuals)
+plot(plot_acf)
+
+```
+
+
+
